@@ -25,6 +25,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
 	// "gopkg.in/telegram-bot-api.v4"
 	"github.com/go-telegram-bot-api/telegram-bot-api"
 )
@@ -47,6 +48,7 @@ const (
 
 type sendQueue struct {
 	bot    *tgbotapi.BotAPI
+	dbm    *dbManager
 	lock   *sync.Mutex
 	cv     *sync.Cond
 	low    *list.List
@@ -54,9 +56,10 @@ type sendQueue struct {
 	high   *list.List
 }
 
-func NewSendQueue(bot *tgbotapi.BotAPI) *sendQueue {
+func NewSendQueue(bot *tgbotapi.BotAPI, dbm *dbManager) *sendQueue {
 	q := &sendQueue{
 		bot:    bot,
+		dbm:    dbm,
 		lock:   new(sync.Mutex),
 		cv:     sync.NewCond(new(sync.Mutex)),
 		low:    list.New(),
@@ -149,6 +152,13 @@ func (q *sendQueue) dispatchMessage(item *sendQueueItem) {
 			reflect_msg := reflect.ValueOf(item.msg_config[i])
 			chat_id := reflect_msg.FieldByName("ChatID").Interface()
 			log.Printf("Send to #%+v failed: %+v\n", chat_id, err)
+
+			if err.Error() == "Forbidden: bot was blocked by the user" || err.Error() == "Forbidden: user is deactivated" {
+				if chat_id_int64, ok := chat_id.(int64); ok {
+					log.Printf("Removing #%+v from list\n", chat_id)
+					q.kickUser(chat_id_int64)
+				}
+			}
 		}
 
 		if int(atomic.AddUintptr(&item.msg_finish, 1)) == len(item.msg_config) {
@@ -159,4 +169,23 @@ func (q *sendQueue) dispatchMessage(item *sendQueueItem) {
 	}()
 
 	<-delay
+}
+
+func (q *sendQueue) kickUser(user_a int64) {
+	if user_a == 0 {
+		log.Println("kickUser: user_a == 0")
+		return
+	}
+	err := q.dbm.RemoveInvitation(user_a)
+	if err != nil {
+		log.Println(err)
+	}
+	err = q.dbm.DisconnectChat(user_a, 0)
+	if err != nil {
+		log.Println(err)
+	}
+	err = q.dbm.LeaveLobby(user_a)
+	if err != nil {
+		log.Println(err)
+	}
 }
